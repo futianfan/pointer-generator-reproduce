@@ -9,6 +9,7 @@ import data
 
 def mask_normalize_attention(padding_mask, attention_weight):
 	""" 
+		pkg:  tf 
 		softmax + padding + re-normalize
 
 		Input:
@@ -21,11 +22,11 @@ def mask_normalize_attention(padding_mask, attention_weight):
 			[0.2, 0.3, 0.4, 0.1]
 			[1, 0, 0, 0]]
 	"""
-	attention_weight = tf.nn.softmax(attention_weight, axis = 1)
+	attention_weight = tf.nn.softmax(attention_weight, axis = 1)   		### 1. softmax
 	padding_mask = tf.cast(padding_mask, dtype = tf.float32)
-	attention_weight *= padding_mask
+	attention_weight *= padding_mask 							   		### 2. mask
 	attention_weight_sum = tf.reduce_sum(attention_weight, 1)
-	return attention_weight / tf.reshape(attention_weight_sum, [-1,1])
+	return attention_weight / tf.reshape(attention_weight_sum, [-1,1])	### 3. normalize 
 
 def test_mask_normalize_attention():
 	a = [[1, 1, 1], [1, 1, 0]]
@@ -36,13 +37,71 @@ def test_mask_normalize_attention():
 	with tf.Session() as sess:
 		print(sess.run([attention_weight, new_attention_weight], feed_dict = {padding_mask:a, attention_weight:b}))
 
+def linear(args, out_size, initializer, bias = True):
+	if not isinstance(args, (list, tuple)):
+		args = [args]
+	with tf.variable_scope('linear', reuse = tf.AUTO_REUSE):
+		if len(args) > 1:
+			arg_mat = tf.concat(args, 1)
+		else:
+			arg_mat = args
+		input_size = arg_mat.get_shape()[1].value 
+		w_linear = tf.get_variable('linear-weight', shape = [input_size, out_size], initializer = initializer, dtype = tf.float32)
+		Xw = tf.matmul(arg_mat, w_linear)
+		if bias:
+			b_linear = tf.get_variable('linear-bias', shape = [out_size], initializer = initializer, dtype = tf.float32)
+			Xw += b_linear
+	return  Xw 
 
 
 def attention(encoder_output, decoder_hidden_state, padding_mask, initializer, coverage_features = None):
 	"""
 	Input
 		encoder_output: B,T,D1,    h1,h2,...,h_D
-		decoder_hidden_state:  B,D2     s_{t-1}
+		decoder_hidden_state:  Tuple (state.c, state.h) ([B,D2], [B,D2])  s_{t-1}
+		padding_mask:   B,T   for encoder 
+		coverage_features: B,T 
+
+		paper: Get To The Point: Summarization with Pointer-Generator Networks   https://arxiv.org/pdf/1704.04368.pdf
+	"""
+	batch_size = encoder_output.get_shape()[0].value 
+	T = encoder_output.get_shape()[1].value
+	d1 = encoder_output.get_shape()[2].value
+	d2 = decoder_hidden_state[0].get_shape()[1].value  
+
+	attention_size = d1  ### D 
+
+	with tf.variable_scope("attention", reuse = tf.AUTO_REUSE):
+		v = tf.get_variable(name = 'attention-v', shape = [attention_size], dtype = tf.float32, initializer = initializer)   ### D
+		W_h = tf.get_variable(name = 'attention-Wh', shape = [d1, attention_size], dtype = tf.float32, initializer = initializer)   ### D1, D
+		Wh_hi = tf.tensordot(encoder_output, W_h, axes = (2,0))  ### B,T,D
+		Ws_st = linear(decoder_hidden_state, attention_size, initializer)   ### B,D
+		Ws_st_expand = tf.expand_dims(Ws_st, 1)    ### B,1,D
+
+		if coverage_features != None: 
+			W_c = tf.get_variable(name = "attention-Wc", shape = [attention_size])  ### !!!!!!   
+			Wc_ci = tf.tensordot(tf.expand_dims(coverage_features,-1), tf.expand_dims(W_c,0), axes = 1) ### B,T,D 			
+			summ = tf.nn.tanh(Wh_hi + Ws_st_expand + Wc_ci)
+		else:
+			summ = tf.nn.tanh(Wh_hi + Ws_st_expand)  ### B,T,D 
+		e_summ = tf.tensordot(summ, v, axes = 1)  ####  B,T
+
+	attention_weight = mask_normalize_attention(padding_mask, e_summ)   ### B,T
+	attention_weight_expand = tf.expand_dims(attention_weight, -1)  ### B,T,1
+	context_vectors = encoder_output * attention_weight_expand  #### B,T,D1
+	context_vectors = tf.reduce_sum(context_vectors, 1)  ### B,D1
+	if coverage_features != None:
+		coverage_features += attention_weight
+	return attention_weight, context_vectors, coverage_features
+
+
+
+'''
+def attention(encoder_output, decoder_hidden_state, padding_mask, initializer, coverage_features = None):
+	"""
+	Input
+		encoder_output: B,T,D1,    h1,h2,...,h_D
+		decoder_hidden_state:  Tuple (state.c, state.h) ([B,D2], [B,D2])  s_{t-1}
 		padding_mask:   B,T   for encoder 
 		coverage_features: B,T 
 
@@ -60,9 +119,6 @@ def attention(encoder_output, decoder_hidden_state, padding_mask, initializer, c
 		W_h = tf.get_variable(name = 'attention-Wh', shape = [d1, attention_size], dtype = tf.float32, initializer = initializer)   ### D1, D
 		W_s = tf.get_variable(name = 'attention-Ws', shape = [d2, attention_size], dtype = tf.float32, initializer = initializer)  ### D2, D
 		b_attn = tf.get_variable(name = 'attention-bias', shape = [attention_size], dtype = tf.float32, initializer = initializer)  ### D
-		if coverage_features != None:
-			W_c = tf.get_variable(name = "attention-Wc", shape = [attention_size])  ### !!!!!!   
-			Wc_ci = tf.tensordot(tf.expand_dims(coverage_features,-1), tf.expand_dims(W_c,0), axes = 1) ### B,T,D 
 
 		Wh_hi = tf.tensordot(encoder_output, W_h, axes = (2,0))  ### B,T,D
 		Ws_st = tf.matmul(decoder_hidden_state, W_s)   #### B,D
@@ -70,6 +126,8 @@ def attention(encoder_output, decoder_hidden_state, padding_mask, initializer, c
 		b_attn_expand = tf.expand_dims(tf.expand_dims(b_attn, 0), 0) ## 1,1,D
 
 		if coverage_features != None: 
+			W_c = tf.get_variable(name = "attention-Wc", shape = [attention_size])  ### !!!!!!   
+			Wc_ci = tf.tensordot(tf.expand_dims(coverage_features,-1), tf.expand_dims(W_c,0), axes = 1) ### B,T,D 			
 			summ = tf.nn.tanh(Wh_hi + Ws_st_expand + b_attn_expand + Wc_ci)
 		else:
 			summ = tf.nn.tanh(Wh_hi + Ws_st_expand + b_attn_expand)  ### B,T,D 
@@ -84,21 +142,6 @@ def attention(encoder_output, decoder_hidden_state, padding_mask, initializer, c
 		coverage_features += attention_weight
 	return attention_weight, context_vectors, coverage_features
 
-def linear(args, out_size, initializer, bias = True):
-	if not isinstance(args, (list, tuple)):
-		args = [args]
-	with tf.variable_scope('linear', reuse = tf.AUTO_REUSE):
-		if len(args) > 1:
-			arg_mat = tf.concat(args, 1)
-		else:
-			arg_mat = args
-		input_size = arg_mat.get_shape()[1].value 
-		w_linear = tf.get_variable('linear-weight', shape = [input_size, out_size], initializer = initializer, dtype = tf.float32)
-		Xw = tf.matmul(arg_mat, w_linear)
-		if bias:
-			b_linear = tf.get_variable('linear-bias', shape = [out_size], initializer = initializer, dtype = tf.float32)
-			Xw += b_linear
-	return  Xw 
 
 def decoder(decoder_input, 
 			encoder_output, 
@@ -158,6 +201,98 @@ def decoder(decoder_input,
 		output_all.append(rnn_output)  ### [(B,D2), (B,D2), ..., ]  length T2
 
 	return output_all, p_gens, attention_weights, context_vectors_all, state 
+
+
+'''
+
+
+
+
+
+def decoder(decoder_input, 
+			encoder_output, 
+			decoder_init_state, 
+			cell, 
+			encoder_padding_mask, \
+			initializer,
+			pointer_gen = True, 
+			coverage_features = None, 
+			mode = 'train'
+			):
+	"""
+		decoder_input:  B,T2,D2
+		encoder_output: B,T1,D1
+		decoder_init_state:  (c,h)
+		cell: LSTM 
+		encoder_padding_mask: B,T1
+	"""
+	batch_size = decoder_input.get_shape()[0].value 
+	D1 = encoder_output.get_shape()[2].value 
+	D2 = decoder_input.get_shape()[2].value
+	decoder_input = tf.unstack(decoder_input, axis = 1)  ### B,T2,D2 => list length T2 [(B,D2), (B,D2), ..., (B,D2)]
+	T2 = len(decoder_input)
+	state = decoder_init_state
+	rnn_size = cell.state_size[0]
+
+	output_all = []
+	p_gens = []
+	attention_weights = []
+
+	#### init-state 
+	state = decoder_init_state
+	if mode in ['train', 'valid']:
+		context_vectors = tf.zeros([batch_size, D1])
+	elif mode == 'decode':
+		_, context_vectors, coverage_features = attention(
+			encoder_output, 
+			state,
+			encoder_padding_mask,
+			initializer,
+			coverage_features
+			)
+	#### init-state 
+
+	for i, dec_input in enumerate(decoder_input):   ### 根据 time-length 分开  
+
+		### 1 rnn input
+		with tf.variable_scope('rnn-input'):
+			rnn_input = linear([dec_input] + [context_vectors], rnn_size, initializer)
+
+		### 2 rnn
+		cell_output, state = cell(rnn_input, state)
+
+		### 3 attention   ???????????
+		if mode in ['train', 'valid']:
+			attention_weight, context_vectors, coverage_features = attention(
+				encoder_output, 
+				state,  
+				encoder_padding_mask, 
+				initializer, 
+				coverage_features)
+		else:
+			attention_weights, context_vectors, _ = attention(
+				encoder_output, 
+				state,  
+				encoder_padding_mask, 
+				initializer, 
+				coverage_features)
+		attention_weights.append(attention_weight)   #### [(B,T1), ....]   length is T2. 
+
+
+		###### 4 post-processing 	
+		### 4.1 pointer_gen 
+		if pointer_gen:
+			with tf.variable_scope('pointer_gen'):
+				p_gen = linear([context_vectors] + [state.c] + [state.h] + [rnn_input] + [cell_output], 1, initializer)
+				p_gen = tf.nn.sigmoid(p_gen)  ### (B,) 
+				p_gens.append(p_gen)   ### list of [(B,), (B,), (B,) ..., ]
+
+		### 4.2 rnn output
+		with tf.variable_scope('rnn-output'):
+			rnn_output = linear([cell_output] + [context_vectors], rnn_size, initializer)  ### B,D2
+		output_all.append(rnn_output)  ### [(B,D2), (B,D2), ..., ]  length T2  
+
+	return output_all, p_gens, attention_weights, coverage_features, state 
 	
 def AttentionWeight_2_VocabWeight(attention_weight, encoder_index, vocab_size):
 	"""
@@ -304,7 +439,14 @@ class SummarizeModel(object):
 			self.decode_init_state = tf.contrib.rnn.LSTMStateTuple(self.decode_init_state_c, self.decode_init_state_h)
 
 	def _decoder(self):
+		'''
+			mode = 'train' or 'eval'
+			mode = 'decode'
 
+			if self.coverage ?  
+			if self.pointer_gen ?
+
+		'''
 		self.decode_rnn = tf.contrib.rnn.LSTMCell( 
 			num_units = self.hidden_dim,
 			initializer = self.rand_unif_init,
@@ -312,20 +454,23 @@ class SummarizeModel(object):
 			)
 		##leng = self._encode_batch.get_shape()[1].value
 		leng = tf.shape(self._encode_batch)[1]
-		if self.mode in ['train', 'mode']:
+		if not self.coverage:
+			coverage_features = None
+		elif self.coverage and self.mode in ['train', 'mode']:
 			coverage_features = tf.Variable(tf.zeros(shape = [self.batch_size, 1]))
 			coverage_features = tf.tile(coverage_features, [1, leng])
-		elif self.mode == 'decode':
+		elif self.coverage and self.mode == 'decode':
 			coverage_features = self._prev_coverage
-		self.output_all, self.p_gens, self.attention_weights, self.context_vectors_all, self.decoder_final_state =\
-												decoder(decoder_input = self._decode_embedded, 
-														encoder_output = self.encode_output, 
+		self.output_all, self.p_gens, self.attention_weights, self.coverage_features, self.decoder_final_state = decoder(
+														decoder_input = self._decode_embedded,   ### B,T2,D2
+														encoder_output = self.encode_output, 	### B,T1,D1
 														decoder_init_state = self.decode_init_state, 
 														cell = self.decode_rnn, 
-														encoder_padding_mask = self._encode_padding_mask, \
-														initializer = self.rand_unif_init,
-														pointer_gen = self.pointer_gen, 
-														coverage_features = coverage_features) 
+														encoder_padding_mask = self._encode_padding_mask, ## B,T1
+														initializer = self.rand_unif_init, 
+														pointer_gen = self.pointer_gen,    ### True False
+														coverage_features = coverage_features)  ## tf.zeros or None 
+
 	def _decoder_projection_vocab(self):
 		with tf.variable_scope('projection'):
 			w_proj = tf.get_variable(
@@ -517,7 +662,7 @@ class SummarizeModel(object):
 		step = 0
 		while step < self.max_dec_steps and len(results) < self.batch_size:
 			latest_tokens = [h.latest_token for h in hypothesis_lst]
-			latest_tokens = [t if t in range(self.vocab.size() else vocab.word2id(data.UNKNOWN_TOKEN)) for t in latest_tokens]
+			latest_tokens = [t if t in range(self.vocab.size()) else vocab.word2id(data.UNKNOWN_TOKEN) for t in latest_tokens]
 			states = [h.state for h in hypothesis_lst]
 			prev_coverage = [h.coverage for h in hypothesis_lst]
 
@@ -535,11 +680,11 @@ class SummarizeModel(object):
 
 
 if __name__ == '__main__':
-	'''
-	from config import get_config
+	
+	from config import get_config, valid_config, decode_config
 	config = get_config()
 	model = SummarizeModel(**config)
-	'''
+	
 
 	#test_mask_normalize_attention()
 
