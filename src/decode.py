@@ -6,8 +6,17 @@ import tensorflow as tf
 
 
 
-def run_beam_search(sess, model, vocab, batch):
-	pass 
+class Beam_Search_Model:
+
+	def __init__(self, model, vocab, batcher):
+		self._model = model
+		self._vocab = vocab 
+		self._batcher = batcher 
+		self._saver = tf.train.Saver()
+		self._sess = tf.Session()
+
+
+	
 
 
 
