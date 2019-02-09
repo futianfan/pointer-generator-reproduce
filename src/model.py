@@ -1,5 +1,3 @@
-
-
 import os
 from time import time
 import numpy as np
@@ -321,6 +319,32 @@ def AttentionWeight_2_VocabWeight(attention_weight, encoder_index, vocab_size):
 	return vocab_weight
 
 
+def _mask_and_avg(values, padding_mask):
+	''' Args
+			values:  [(B,), (B,)...] length is T2
+			padding_mask  arr(B,T2)
+	'''	
+	dec_lens = tf.reduce_sum(padding_mask, 1)
+	values_per_step = [v * padding_mask[:,step]  for step,v in enumerate(values)]
+	values_per_ex = sum(values_per_step)/dec_lens
+	return tf.reduce_mean(values_per_ex)
+
+
+def _coverage_loss(attn_dist, padding_mask):
+	'''
+		attn_dist: list, length T2, [(B,T1), (B,T1), ..., ]
+		padding_mask: (B,T2)
+	'''
+	padding_mask_float = tf.cast(padding_mask, dtype = tf.float32)
+	coverage = tf.zeros_like(attn_dist[0])
+	cov_loss_lst = []
+	for i, attn_weight in enumerate(attn_dist):
+		minimum = tf.minimum(coverage, attn_weight)
+		cov_loss = tf.reduce_sum(minimum, 1)  ### (B,)
+		cov_loss_lst.append(cov_loss)   ### [(B,), (B,) ...], length is T2
+		coverage += attn_weight
+	coverage_loss = _mask_and_avg(cov_loss_lst, padding_mask_float)
+	return coverage_loss	
 
 
 class SummarizeModel(object):
@@ -551,7 +575,8 @@ class SummarizeModel(object):
 
 		if self.coverage:
 			## compute coverage loss
-			pass 
+			self._coverage_loss = _coverage_loss(self.attention_weights, self._decode_padding_mask) 
+			self._loss += self.cov_loss_wt + self._coverage_loss
 
 	def _train_op(self):
 		self.train_fn = tf.train.GradientDescentOptimizer(learning_rate=self.lr).minimize(self._loss)
@@ -630,6 +655,12 @@ class SummarizeModel(object):
 			prev_coverage 
 
 		Returns
+			topk_id:   B, topk
+			log_prob:  B, topk 
+			dec_state:   Tuple((B,d), (B,d))
+			attn_dist:   [(B,T)], here length is 1. 
+			p_gens:     [(B,)] length is 1 
+			coverage_features:    arr(B,T)
 		"""
 		### 1. to_return
 		to_return = dict()
@@ -686,9 +717,9 @@ class SummarizeModel(object):
 		'''
 			self.model_encode + multiple * "self.model_decode_onestep"
 		'''
-		encoder_output, dec_in_state = self.model_encode(batch, sess)
 
 		### initial state 
+		encoder_output, dec_in_state = self.model_encode(batch, sess)
 		coverage_init = np.zeros([batch.enc_batch.shape[1]])   	
 		hypothesis_lst = [Hypothesis(tokens = [vocab.word2id(data.START_DECODING)],
 									 log_probs = [0.0],
@@ -699,7 +730,7 @@ class SummarizeModel(object):
 							for _ in range(self.batch_size)]
 		results = []
 
-
+		### decoder iteration 
 		step = 0
 		while step < self.max_dec_steps2 and len(results) < self.batch_size:
 			### 1. preprocessing:  change format? 
@@ -707,7 +738,6 @@ class SummarizeModel(object):
 			latest_tokens = [h.latest_token for h in hypothesis_lst]
 			latest_tokens = [t if t in range(vocab.size()) else vocab.word2id(data.UNKNOWN_TOKEN) for t in latest_tokens]
 			latest_tokens = np.array(latest_tokens).reshape(-1, 1)
-			latest_tokens.astype(np.int32)
 			### 1.2 decoder hidden state
 			states = [h.state for h in hypothesis_lst]
 			states_c = [h.state[0].reshape(1,-1) for h in hypothesis_lst]
@@ -715,25 +745,47 @@ class SummarizeModel(object):
 			states_h = [h.state[1].reshape(1,-1) for h in hypothesis_lst]
 			states_h = np.concatenate(states_h, 0) 
 			states = (states_c, states_h)
-
 			### 1.3 prev coverage 
 			prev_coverage = [h.coverage for h in hypothesis_lst]
 			prev_coverage = [i.reshape(1,-1) for i in prev_coverage]
 			prev_coverage = np.concatenate(prev_coverage, 0)
 
+
+
+			'''
+				Returns of model_decode_onestep
+					topk_id:   B, topk
+					log_prob:  B, topk 
+					dec_state:   Tuple((B,d), (B,d))
+					attn_dist:   [(B,T)], here length is 1. 
+					p_gens:     [(B,)] length is 1 
+					coverage_features:    arr(B,T)
+			'''
 			(topk_ids, topk_log_probs, new_states, attn_dists, p_gens, new_coverage) = self.model_decode_onestep(
-						sess=sess,
-						batch=batch,
-						latest_tokens=latest_tokens,
-						enc_states=encoder_output,
-						dec_states=states,
-						prev_coverage=prev_coverage)
+						sess=sess,  ## fixed 
+						batch=batch,   ### fixed
+						latest_tokens=latest_tokens,   ### 1.1 
+						enc_states=encoder_output,  ### fixed 
+						dec_states=states,   ### 1.2 
+						prev_coverage=prev_coverage)  ### 1.3 
 
 			all_hypos = []
 			num_orig_hyps = 1 if step == 0 else len(hypothesis_lst)
 			# On the first step, we only had one original hypothesis (the initial hypothesis). On subsequent steps, all original hypotheses are distinct.
 			for i in range(num_orig_hyps):
-				h, new_state, attn_dist, p_gen, new_coverage_i = hypothesis_lst[i], new_states[i], attn_dists[i], p_gens[i], new_coverage[i]  
+				'''
+				print(len(hypothesis_lst))  ### 16
+				print(len(new_states))    ### 2
+				print(len(attn_dists))    ### 1
+				print(len(p_gens))        ### 1
+				print(len(new_coverage))  ### 16 
+				''' 
+				h = hypothesis_lst[i]
+				new_state = (new_states[0][i], new_states[1][i])
+				attn_dist = attn_dists[0]
+				p_gen = p_gens[0][i]
+				new_coverage_i = new_coverage[i]
+				#h, new_state, attn_dist, p_gen, new_coverage_i = hypothesis_lst[i], new_states[i], attn_dists[i], p_gens[i], new_coverage[i]  
 				# take the ith hypothesis and new decoder state info
 				for j in range(self.batch_size * 2):  # for each of the top 2*beam_size hyps:
 					# Extend the ith hypothesis with the jth option
@@ -746,26 +798,30 @@ class SummarizeModel(object):
 					all_hypos.append(new_hyp)
 
 
-
 			# Filter and collect any hypotheses that have produced the end token.
-			hyps = [] # will contain hypotheses for the next step
+			hypothesis_lst = [] # will contain hypotheses for the next step
 			for h in sort_hyps(all_hypos): # in order of most likely h
 				if h.latest_token == vocab.word2id(data.STOP_DECODING): # if stop token is reached...
 				# If this hypothesis is sufficiently long, put in results. Otherwise discard.
 					if step >= self.min_dec_steps:
 						results.append(h)
 				else: # hasn't reached stop token, so continue to extend this hypothesis
-					hyps.append(h)
-				if len(hyps) == self.batch_size or len(results) == self.batch_size:
+					hypothesis_lst.append(h)
+				if len(hypothesis_lst) == self.batch_size or len(results) == self.batch_size:
 					# Once we've collected beam_size-many hypotheses for the next step, or beam_size-many complete hypotheses, stop.
+					#print('hyps ')
+					#show_hypothesis(hyps)
+					#print('result')
+					#show_hypothesis(results)
 					break
-
+			print('{} {}'.format(step, self.max_dec_steps2))
 			step += 1
 
+		### post-processing after while-loop 
 		# At this point, either we've got beam_size results, or we've reached maximum decoder steps
 
 		if len(results)==0: # if we don't have any complete results, add all current hypotheses (incomplete summaries) to results
-			results = hyps
+			results = hypothesis_lst
 
 		# Sort hypotheses by average log probability
 		hyps_sorted = sort_hyps(results)
@@ -778,6 +834,11 @@ def sort_hyps(hyps):
 	"""Return a list of Hypothesis objects, sorted by descending average log probability"""
 	return sorted(hyps, key=lambda h: h.avg_log_prob, reverse=True)
 
+
+def show_hypothesis(results):
+	for i in results:
+		print(i.tokens)
+	return 
 
 if __name__ == '__main__':
 	

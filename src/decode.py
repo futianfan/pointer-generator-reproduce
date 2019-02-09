@@ -88,6 +88,7 @@ class BeamSearchDecoder(object):
 
       # Run beam search to get best Hypothesis
       best_hyp = self._model.model_decode(batch, self._sess, self._vocab)
+      print(best_hyp.tokens)
       #best_hyp = None
 
       # Extract the output ids from the hypothesis and convert back to words

@@ -68,14 +68,14 @@ def decode_config():
 	### modified 
 	config['batch_size'] = valid_cfg['batch_size']  ### beam-size 
 	config['mode'] = 'decode'
+	config['max_dec_steps2'] = valid_cfg['max_dec_steps']  ### 100 	
 	config['max_dec_steps'] = 1   ### 1 ?
-	config['max_dec_steps2'] = valid_cfg['max_dec_steps']  ### 100 
 	config['single_pass'] = True
 
 
 	### new
 	config['decode_folder'] = os.path.join(config['log_folder'], 'decode')
-	config['min_dec_steps'] = 35 
+	config['min_dec_steps'] = 10 ##  35 
 
 
 	return config
@@ -83,7 +83,7 @@ def decode_config():
 
 if __name__ == '__main__':
 	config = decode_config()
-	print(config)
+	print(config['max_dec_steps2'])
 
 
 
