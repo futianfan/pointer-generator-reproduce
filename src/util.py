@@ -74,7 +74,7 @@ class Hypothesis:
 
 	@property
 	def avg_log_prob(self):
-		return self.log_probs / len(self.tokens)
+		return self.log_prob / len(self.tokens)
 
 
 

@@ -59,24 +59,28 @@ def decode():
 	hps = namedtuple("HParams", config.keys())(**config)
 	batcher = Batcher(FLAGS.data_path, vocab, hps, single_pass=config['single_pass'])
 	from model import SummarizeModel
+	from decode import BeamSearchDecoder
 	### Model
 	model = SummarizeModel(**config)
-	setup_decode(model, batcher, config)	
+	beamsearch_model = BeamSearchDecoder(model, batcher, vocab)
+	beamsearch_model.decode()
 
 
+'''
 def setup_decode(model, batcher, config):
 	decode_directory = config['decode_folder']
 	valid_directory = config['valid_folder']
+	train_directory = config['train_folder']
 
 	if not os.path.exists(decode_directory):
 		os.makedirs(decode_directory)
 
-	saver = tf.train.Saver(max_to_keep = 3)
+	saver = tf.train.Saver()  ### max_to_keep = 3 ? 
 	sess = tf.Session(config = util.get_config())
 	_ = util.load_checkpoint(saver = saver,
 							 sess = sess, 
 							 log_directory = config['decode_folder'],
-							 checkpoint_directory = 'valid' 
+							 checkpoint_directory = 'train'  ### valid
 							)
 
 	### batch
@@ -85,6 +89,7 @@ def setup_decode(model, batcher, config):
 	from decode import run_beam_search
 
 	### un-finished 
+'''
 
 
 def setup_valid(model, batcher, config):
@@ -164,6 +169,8 @@ if __name__ == '__main__':
 		train()
 	elif FLAGS.mode == 'valid':
 		valid()
+	elif FLAGS.mode == 'decode':
+		decode()
 
 
 

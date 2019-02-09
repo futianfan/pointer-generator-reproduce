@@ -10,7 +10,7 @@ def get_config():
 
 	config['data_folder'] = 'data'
 	config['vocab_file'] = os.path.join(config['data_folder'], 'vocab')
-	config['vocab_size'] = 50000  ### 50000 
+	config['vocab_size'] = 20000  ### 50000 
 
 	config['log_folder'] = 'log'
 	config['train_folder'] = os.path.join(config['log_folder'], 'train')
@@ -32,8 +32,7 @@ def get_config():
 
 
 	config['single_pass'] = False
-	config['minimum_log_value'] = 1e-12
-
+	config['minimum_log_value'] = 1e-12  ### ???     
 
 	config['train_iter'] = int(1e5)
 
@@ -85,11 +84,6 @@ def decode_config():
 if __name__ == '__main__':
 	config = decode_config()
 	print(config)
-
-
-
-
-
 
 
 

@@ -456,7 +456,7 @@ class SummarizeModel(object):
 			state_is_tuple = True
 			)
 		##leng = self._encode_batch.get_shape()[1].value
-		leng = tf.shape(self._encode_batch)[1]
+		leng = tf.shape(self._encode_padding_mask)[1]  ##  _encode_padding_mask, _encode_batch  have equal size 
 		if not self.coverage:
 			coverage_features = None
 		elif self.coverage and self.mode in ['train', 'valid']:
@@ -499,7 +499,10 @@ class SummarizeModel(object):
 					extend_projection = tf.zeros([self.batch_size, self._max_num_oovs])
 					extend_projection = tf.concat([projection, extend_projection], 1)
 					#print(type(extend_projection))
-					pointer_gen_weight = AttentionWeight_2_VocabWeight(attention_weight, self._encode_batch, vocab_size_extend)
+					pointer_gen_weight = AttentionWeight_2_VocabWeight(
+											attention_weight, 
+											self._encode_batch_extend_vocab, 
+											vocab_size_extend)  	#### _encode_batch_extend_vocab, _encode_batch !!! ???
 					projection = p_gen * extend_projection + (1 - p_gen) * pointer_gen_weight
 
 				self.projection_all.append(projection)
@@ -606,15 +609,16 @@ class SummarizeModel(object):
 		to_return['loss'] = self._loss
 		return sess.run(to_return, feed_dict)
 
-
+	############################################################################################################
+	############################################################################################################
 	### for 'decode'
 	def model_encode(self, batch, sess):
 		feed_dict = self._make_feed_dict(batch, only_enc = True)
-		encoder_output, decode_init_state = sess.run([self.encoder_output, self.decode_init_state], feed_dict)
+		encoder_output, decode_init_state = sess.run([self.encode_output, self.decode_init_state], feed_dict)
+		#dec_in_state = tf.contrib.rnn.LSTMStateTuple(decode_init_state.c[0], decode_init_state.h[0])  
 		dec_in_state = tf.contrib.rnn.LSTMStateTuple(decode_init_state.c[0], decode_init_state.h[0])  
 		return encoder_output, dec_in_state
 
-	### for 'decode'
 	def model_decode_onestep(self, sess, batch, latest_tokens, enc_states, dec_states, prev_coverage):
 		"""
 		Args
@@ -627,34 +631,28 @@ class SummarizeModel(object):
 
 		Returns
 		"""
-
-		### preprocess		
-
-
-		### to_return
+		### 1. to_return
 		to_return = dict()
 		to_return['topk_id'] = self.topk_id
 		to_return['log_prob'] = self.log_prob
 		to_return['dec_state'] = self.decoder_final_state
 		to_return['attn_dist'] = self.attention_weights 
 
-		### feed_dict
+		### 2. feed_dict
 		feed_dict = {}
 		feed_dict[self._decode_batch] = latest_tokens    #### => self._decode_embedded
 		feed_dict[self.encode_output] = enc_states
-		feed_dict[self.decode_init_state] = dec_states
+		feed_dict[self.decode_init_state] = dec_states  ### LSTMStateTuple(c, h)
 		feed_dict[self._encode_padding_mask] = batch.enc_padding_mask
 
 		if self.coverage:  
 			to_return['coverage_features'] = self.coverage_features
 			feed_dict[self._prev_coverage] = prev_coverage
 
-
 		if self.pointer_gen:  
 			to_return['p_gens'] = self.p_gens		
 			feed_dict[self._encode_batch_extend_vocab] = batch.enc_batch_extend_vocab
 			feed_dict[self._max_num_oovs] = batch.max_art_oovs 
-
 
 		'''
 			decoder(
@@ -668,17 +666,17 @@ class SummarizeModel(object):
 				coverage_features = coverage_features) 
 		'''
 
-		### sess.run 
-		return_dict.update(sess.run(to_return, feed_dict))
+		### 3. sess.run 
+		return_dict = sess.run(to_return, feed_dict)
 		if not self.coverage:
 			return_dict['coverage_features'] = [None for _ in range(self.batch_size)]
 		if not self.pointer_gen:
 			return_dict['p_gens'] = [None for _ in range(self.batch_size)]
-		### post-processing 
+		### 4. post-processing 
 
 		return  return_dict['topk_id'], \
 				return_dict['log_prob'], \
-				return_dict['dec_states'], \
+				return_dict['dec_state'], \
 				return_dict['attn_dist'], \
 				return_dict['p_gens'], \
 				return_dict['coverage_features']
@@ -688,38 +686,51 @@ class SummarizeModel(object):
 		'''
 			self.model_encode + multiple * "self.model_decode_onestep"
 		'''
-
 		encoder_output, dec_in_state = self.model_encode(batch, sess)
 
 		### initial state 
-		coverage_init = np.zeros([self._encode_batch.shape[1]])   ### ?? get_shape
+		coverage_init = np.zeros([batch.enc_batch.shape[1]])   	
 		hypothesis_lst = [Hypothesis(tokens = [vocab.word2id(data.START_DECODING)],
 									 log_probs = [0.0],
-						 			 state = dec_in_state, 
-						 			 attn_dists = [], 
-						 			 p_gens = [], 
-						 			 coverage = coverage_init) 
+									 state = dec_in_state, 
+									 attn_dists = [], 
+									 p_gens = [], 
+									 coverage = coverage_init) 
 							for _ in range(self.batch_size)]
 		results = []
 
 
 		step = 0
 		while step < self.max_dec_steps2 and len(results) < self.batch_size:
+			### 1. preprocessing:  change format? 
+			### 1.1 lastest token
 			latest_tokens = [h.latest_token for h in hypothesis_lst]
 			latest_tokens = [t if t in range(vocab.size()) else vocab.word2id(data.UNKNOWN_TOKEN) for t in latest_tokens]
+			latest_tokens = np.array(latest_tokens).reshape(-1, 1)
+			latest_tokens.astype(np.int32)
+			### 1.2 decoder hidden state
 			states = [h.state for h in hypothesis_lst]
-			prev_coverage = [h.coverage for h in hypothesis_lst]
+			states_c = [h.state[0].reshape(1,-1) for h in hypothesis_lst]
+			states_c = np.concatenate(states_c, 0)
+			states_h = [h.state[1].reshape(1,-1) for h in hypothesis_lst]
+			states_h = np.concatenate(states_h, 0) 
+			states = (states_c, states_h)
 
-			(topk_ids, topk_log_probs, new_states, attn_dists, p_gens, new_coverage) = model.model_decode_onestep(
+			### 1.3 prev coverage 
+			prev_coverage = [h.coverage for h in hypothesis_lst]
+			prev_coverage = [i.reshape(1,-1) for i in prev_coverage]
+			prev_coverage = np.concatenate(prev_coverage, 0)
+
+			(topk_ids, topk_log_probs, new_states, attn_dists, p_gens, new_coverage) = self.model_decode_onestep(
 						sess=sess,
 						batch=batch,
 						latest_tokens=latest_tokens,
 						enc_states=encoder_output,
-						dec_init_states=states,
+						dec_states=states,
 						prev_coverage=prev_coverage)
 
 			all_hypos = []
-			num_orig_hyps = 1 if steps == 0 else len(hypothesis_lst)
+			num_orig_hyps = 1 if step == 0 else len(hypothesis_lst)
 			# On the first step, we only had one original hypothesis (the initial hypothesis). On subsequent steps, all original hypotheses are distinct.
 			for i in range(num_orig_hyps):
 				h, new_state, attn_dist, p_gen, new_coverage_i = hypothesis_lst[i], new_states[i], attn_dists[i], p_gens[i], new_coverage[i]  
@@ -738,14 +749,14 @@ class SummarizeModel(object):
 
 			# Filter and collect any hypotheses that have produced the end token.
 			hyps = [] # will contain hypotheses for the next step
-			for h in sort_hyps(all_hyps): # in order of most likely h
+			for h in sort_hyps(all_hypos): # in order of most likely h
 				if h.latest_token == vocab.word2id(data.STOP_DECODING): # if stop token is reached...
 				# If this hypothesis is sufficiently long, put in results. Otherwise discard.
-					if steps >= self.min_dec_steps:
+					if step >= self.min_dec_steps:
 						results.append(h)
 				else: # hasn't reached stop token, so continue to extend this hypothesis
 					hyps.append(h)
-				if len(hyps) == self.batch_size or len(results) == FLAGS.beam_size:
+				if len(hyps) == self.batch_size or len(results) == self.batch_size:
 					# Once we've collected beam_size-many hypotheses for the next step, or beam_size-many complete hypotheses, stop.
 					break
 
