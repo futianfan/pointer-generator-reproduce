@@ -66,7 +66,9 @@ class BeamSearchDecoder(object):
     """Decode examples until data is exhausted (if FLAGS.single_pass) and return, or decode indefinitely, loading latest checkpoint at regular intervals"""
     t0 = time.time()
     counter = 0
+    step = 0
     while True:
+      step += 1
       batch = self._batcher.next_batch()  # 1 example repeated across batch
       if batch is None: # finished decoding dataset in single_pass mode
         assert self._model.single_pass, "Dataset exhausted, but we are not in single_pass mode"
@@ -118,7 +120,7 @@ class BeamSearchDecoder(object):
           t0 = time.time()
 
       t_end_decode = time.time()
-      print('decode one batch requires {} seconds'.format(int(t_end_decode - t_start_decode)))
+      print('decode {}-th batch requires {} seconds'.format(step, int(t_end_decode - t_start_decode)))
 
   def write_for_rouge(self, reference_sents, decoded_words, ex_index):
     """Write output to file in correct format for eval with pyrouge. This is called in single_pass mode.

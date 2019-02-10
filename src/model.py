@@ -7,14 +7,13 @@ import data
 
 def mask_normalize_attention(padding_mask, attention_weight):
 	""" 
-		pkg:  tf 
 		softmax + padding + re-normalize
 
-		Input:
+		Args:
 			padding_mask: B,T
 			attention_weight: B,T
 
-		Output:
+		Return:
 			row sum is 1. attention weight 
 			[[0.7, 0.1, 0.2, 0]
 			[0.2, 0.3, 0.4, 0.1]
@@ -53,176 +52,59 @@ def linear(args, out_size, initializer, bias = True):
 
 
 def attention(encoder_output, decoder_hidden_state, padding_mask, initializer, coverage_features = None):
-	"""
-	Input
-		encoder_output: B,T,D1,    h1,h2,...,h_D
-		decoder_hidden_state:  Tuple (state.c, state.h) ([B,D2], [B,D2])  s_{t-1}
-		padding_mask:   B,T   for encoder 
-		coverage_features: B,T 
+	"""   		paper: Get To The Point: Summarization with Pointer-Generator Networks   https://arxiv.org/pdf/1704.04368.pdf 
+	Args:
+		encoder_output: B,T1,D1,    h1,h2,...,h_D
+		decoder_hidden_state:  Tuple(state.c, state.h) ([B,D2], [B,D2]), i.e., s_{t-1}
+		padding_mask:   B,T1 			1/0 for encoder 
+		coverage_features: arr(B,T1) or ***None*** 
 
-		paper: Get To The Point: Summarization with Pointer-Generator Networks   https://arxiv.org/pdf/1704.04368.pdf
+	Return 
+		attention_weight,    B,T1 
+		context_vectors,	 B,D1 
+		coverage_features,   B,D1
 	"""
-	batch_size = encoder_output.get_shape()[0].value 
-	T = encoder_output.get_shape()[1].value
-	d1 = encoder_output.get_shape()[2].value
-	d2 = decoder_hidden_state[0].get_shape()[1].value  
-
+	d1 = encoder_output.get_shape()[2].value   ### D1 = d1
+	d2 = decoder_hidden_state[0].get_shape()[1].value  ### D2 = d2
 	attention_size = d1  ### D 
 
 	with tf.variable_scope("attention", reuse = tf.AUTO_REUSE):
 		v = tf.get_variable(name = 'attention-v', shape = [attention_size], dtype = tf.float32, initializer = initializer)   ### D
 		W_h = tf.get_variable(name = 'attention-Wh', shape = [d1, attention_size], dtype = tf.float32, initializer = initializer)   ### D1, D
-		Wh_hi = tf.tensordot(encoder_output, W_h, axes = (2,0))  ### B,T,D
-		Ws_st = linear(decoder_hidden_state, attention_size, initializer)   ### B,D
+		Wh_hi = tf.tensordot(encoder_output, W_h, axes = (2,0))  ### B,T1,D
+		Ws_st = linear(decoder_hidden_state, attention_size, initializer, bias = True)   ### B,D
 		Ws_st_expand = tf.expand_dims(Ws_st, 1)    ### B,1,D
 
 		if coverage_features != None: 
 			W_c = tf.get_variable(name = "attention-Wc", shape = [attention_size])  ### !!!!!!   
-			Wc_ci = tf.tensordot(tf.expand_dims(coverage_features,-1), tf.expand_dims(W_c,0), axes = 1) ### B,T,D 			
+			Wc_ci = tf.tensordot(tf.expand_dims(coverage_features,-1), tf.expand_dims(W_c,0), axes = 1) ### B,T1,D 			
 			summ = tf.nn.tanh(Wh_hi + Ws_st_expand + Wc_ci)
 		else:
-			summ = tf.nn.tanh(Wh_hi + Ws_st_expand)  ### B,T,D 
-		e_summ = tf.tensordot(summ, v, axes = 1)  ####  B,T
+			summ = tf.nn.tanh(Wh_hi + Ws_st_expand)  ### B,T1,D 
+		e_summ = tf.tensordot(summ, v, axes = 1)  ####  B,T1
 
-	attention_weight = mask_normalize_attention(padding_mask, e_summ)   ### B,T
-	attention_weight_expand = tf.expand_dims(attention_weight, -1)  ### B,T,1
-	context_vectors = encoder_output * attention_weight_expand  #### B,T,D1
+	attention_weight = mask_normalize_attention(padding_mask, e_summ)   ### B,T1
+	attention_weight_expand = tf.expand_dims(attention_weight, -1)  ### B,T1,1
+	context_vectors = encoder_output * attention_weight_expand  #### B,T1,D1
 	context_vectors = tf.reduce_sum(context_vectors, 1)  ### B,D1
 	if coverage_features != None:
 		coverage_features += attention_weight
 	return attention_weight, context_vectors, coverage_features
-
-
-
-'''
-def attention(encoder_output, decoder_hidden_state, padding_mask, initializer, coverage_features = None):
-	"""
-	Input
-		encoder_output: B,T,D1,    h1,h2,...,h_D
-		decoder_hidden_state:  Tuple (state.c, state.h) ([B,D2], [B,D2])  s_{t-1}
-		padding_mask:   B,T   for encoder 
-		coverage_features: B,T 
-
-		paper: Get To The Point: Summarization with Pointer-Generator Networks   https://arxiv.org/pdf/1704.04368.pdf
-	"""
-	batch_size = encoder_output.get_shape()[0].value 
-	T = encoder_output.get_shape()[1].value
-	d1 = encoder_output.get_shape()[2].value
-	d2 = decoder_hidden_state.get_shape()[1].value  
-
-	attention_size = d1 
-
-	with tf.variable_scope("attention", reuse = tf.AUTO_REUSE):
-		v = tf.get_variable(name = 'attention-v', shape = [attention_size], dtype = tf.float32, initializer = initializer)   ### D
-		W_h = tf.get_variable(name = 'attention-Wh', shape = [d1, attention_size], dtype = tf.float32, initializer = initializer)   ### D1, D
-		W_s = tf.get_variable(name = 'attention-Ws', shape = [d2, attention_size], dtype = tf.float32, initializer = initializer)  ### D2, D
-		b_attn = tf.get_variable(name = 'attention-bias', shape = [attention_size], dtype = tf.float32, initializer = initializer)  ### D
-
-		Wh_hi = tf.tensordot(encoder_output, W_h, axes = (2,0))  ### B,T,D
-		Ws_st = tf.matmul(decoder_hidden_state, W_s)   #### B,D
-		Ws_st_expand = tf.expand_dims(Ws_st, 1)    ### B,1,D
-		b_attn_expand = tf.expand_dims(tf.expand_dims(b_attn, 0), 0) ## 1,1,D
-
-		if coverage_features != None: 
-			W_c = tf.get_variable(name = "attention-Wc", shape = [attention_size])  ### !!!!!!   
-			Wc_ci = tf.tensordot(tf.expand_dims(coverage_features,-1), tf.expand_dims(W_c,0), axes = 1) ### B,T,D 			
-			summ = tf.nn.tanh(Wh_hi + Ws_st_expand + b_attn_expand + Wc_ci)
-		else:
-			summ = tf.nn.tanh(Wh_hi + Ws_st_expand + b_attn_expand)  ### B,T,D 
-		e_summ = tf.tensordot(summ, v, axes = 1)  ####  B,T
-
-
-	attention_weight = mask_normalize_attention(padding_mask, e_summ)   ### B,T
-	attention_weight_expand = tf.expand_dims(attention_weight, -1)  ### B,T,1
-	context_vectors = encoder_output * attention_weight_expand  #### B,T,D1
-	context_vectors = tf.reduce_sum(context_vectors, 1)  ### B,D1
-	if coverage_features != None:
-		coverage_features += attention_weight
-	return attention_weight, context_vectors, coverage_features
-
-
-def decoder(decoder_input, 
-			encoder_output, 
-			decoder_init_state, 
-			cell, 
-			encoder_padding_mask, \
-			initializer,
-			pointer_gen = True, 
-			coverage_features = None ):
-	"""
-		decoder_input:  B,T2,D2
-		encoder_output: B,T1,D1
-		decoder_init_state:  (c,h)
-		cell: LSTM 
-		encoder_padding_mask: B,T1
-	"""
-	D2 = decoder_input.get_shape()[2].value
-	decoder_input = tf.unstack(decoder_input, axis = 1)  ### B,T2,D2 => list length T2 [(B,D2), (B,D2), ..., (B,D2)]
-	T2 = len(decoder_input)
-	state = decoder_init_state
-	rnn_size = cell.state_size[0]
-
-	output_all = []
-	p_gens = []
-	attention_weights = []
-	context_vectors_all = []
-
-	for i, dec_input in enumerate(decoder_input):
-
-		### context vector 
-		attention_weight, context_vectors, coverage_features = attention(
-			encoder_output, 
-			dec_input,  ### ?? 
-			encoder_padding_mask, 
-			initializer, 
-			coverage_features)
-		attention_weights.append(attention_weight)
-		context_vectors_all.append(context_vectors)
-
-		### rnn input
-		with tf.variable_scope('rnn-input'):
-			rnn_input = linear([dec_input] + [context_vectors], rnn_size, initializer)
-
-		### rnn
-		cell_output, state = cell(rnn_input, state)
-		
-		if pointer_gen:
-			with tf.variable_scope('pointer_gen'):
-				p_gen = linear([context_vectors] + [state.c] + [state.h] + [rnn_input] + [cell_output], 1, initializer)
-				p_gen = tf.nn.sigmoid(p_gen)  ### (B,) 
-				p_gens.append(p_gen)
-
-		### rnn output
-		with tf.variable_scope('rnn-output'):
-			rnn_output = linear([cell_output] + [context_vectors], rnn_size, initializer)  ### B,D2
-
-		output_all.append(rnn_output)  ### [(B,D2), (B,D2), ..., ]  length T2
-
-	return output_all, p_gens, attention_weights, context_vectors_all, state 
-
-
-'''
-
-
 
 
 #### most important function 
-def decoder(decoder_input, 
-			encoder_output, 
-			decoder_init_state, 
-			cell, 
-			encoder_padding_mask, \
-			initializer,
-			pointer_gen = True, 
-			coverage_features = None, 
-			mode = 'train'
-			):
+def decoder(decoder_input, encoder_output, decoder_init_state, cell, encoder_padding_mask, \
+			initializer, pointer_gen = True, coverage_features = None, mode = 'train'):
 	"""
+		multiple time-step. each time-step, use attention. 
+	Args
 		decoder_input:  B,T2,D2
 		encoder_output: B,T1,D1
-		decoder_init_state:  (c,h)
+		decoder_init_state:  (c,h) Tuple((B,D2), (B,D2))
 		cell: LSTM 
 		encoder_padding_mask: B,T1
+	Returns
+
 	"""
 	batch_size = decoder_input.get_shape()[0].value 
 	D1 = encoder_output.get_shape()[2].value 
@@ -236,7 +118,7 @@ def decoder(decoder_input,
 	p_gens = []
 	attention_weights = []
 
-	#### init-state 
+	############################ init-state 
 	state = decoder_init_state
 	if mode in ['train', 'valid']:
 		context_vectors = tf.zeros([batch_size, D1])
@@ -246,9 +128,8 @@ def decoder(decoder_input,
 			state,
 			encoder_padding_mask,
 			initializer,
-			coverage_features
-			)
-	#### init-state 
+			coverage_features)
+	############################ init-state 
 
 	for i, dec_input in enumerate(decoder_input):   ### 根据 time-length 分开  
 
@@ -276,7 +157,6 @@ def decoder(decoder_input,
 				coverage_features)
 		attention_weights.append(attention_weight)   #### [(B,T1), ....]   length is T2. 
 
-
 		###### 4 post-processing 	
 		### 4.1 pointer_gen 
 		if pointer_gen:
@@ -293,8 +173,6 @@ def decoder(decoder_input,
 	return output_all, p_gens, attention_weights, coverage_features, state 
 
 
-
-	
 def AttentionWeight_2_VocabWeight(attention_weight, encoder_index, vocab_size):
 	"""
 		T is unknown 
@@ -323,6 +201,8 @@ def _mask_and_avg(values, padding_mask):
 	''' Args
 			values:  [(B,), (B,)...] length is T2
 			padding_mask  arr(B,T2)
+		Return
+			a scalar
 	'''	
 	dec_lens = tf.reduce_sum(padding_mask, 1)
 	values_per_step = [v * padding_mask[:,step]  for step,v in enumerate(values)]
@@ -331,9 +211,10 @@ def _mask_and_avg(values, padding_mask):
 
 
 def _coverage_loss(attn_dist, padding_mask):
-	'''
-		attn_dist: list, length T2, [(B,T1), (B,T1), ..., ]
-		padding_mask: (B,T2)
+	''' 
+		Args
+			attn_dist: list, length T2, [(B,T1), (B,T1), ..., ]
+			padding_mask: (B,T2)
 	'''
 	padding_mask_float = tf.cast(padding_mask, dtype = tf.float32)
 	coverage = tf.zeros_like(attn_dist[0])
@@ -356,7 +237,7 @@ class SummarizeModel(object):
 
 	def __init__(self, **config):
 		self.__dict__.update(**config)
-		with tf.device("/gpu:0"):
+		with tf.device("/gpu:1"):
 			self._build_graph()
 
 
@@ -375,8 +256,6 @@ class SummarizeModel(object):
 				self._train_op()
 		elif self.mode == 'decode':
 			self._beam_search()
-
-		#self._session()
 		t2 = time()
 		print('build graph cost {} seconds'.format(int(t2-t1)))
 
@@ -540,7 +419,6 @@ class SummarizeModel(object):
 		Return:
 		vocab_weight:  B, vocab_size
 	"""
-
 	def _compute_loss(self):
 		if self.pointer_gen:
 			## consider oov      ***gather_nd****
@@ -562,7 +440,6 @@ class SummarizeModel(object):
 			loss_mat = tf.reduce_sum(loss_mat, 1)  ### (B,)
 			decode_leng = tf.reduce_sum(_decode_padding_mask, 1) ### (B,)
 			self._loss = tf.reduce_mean(loss_mat / decode_leng)
-
 
 		else:
 			_decode_padding_mask = tf.cast(self._decode_padding_mask, dtype = tf.float32)			
@@ -587,8 +464,6 @@ class SummarizeModel(object):
 		topk_prob, self.topk_id = tf.nn.top_k(projection, self.batch_size * 2)  ## batch_size * 2?
 		self.log_prob = tf.log(topk_prob)
 
-
-	
 	def _make_feed_dict(self, batch, only_enc = False):
 		"""
 			only_enc: 
@@ -751,16 +626,13 @@ class SummarizeModel(object):
 			prev_coverage = np.concatenate(prev_coverage, 0)
 
 
-
-			'''
-				Returns of model_decode_onestep
+			'''	Returns of model_decode_onestep
 					topk_id:   B, topk
 					log_prob:  B, topk 
 					dec_state:   Tuple((B,d), (B,d))
 					attn_dist:   [(B,T)], here length is 1. 
 					p_gens:     [(B,)] length is 1 
-					coverage_features:    arr(B,T)
-			'''
+					coverage_features:    arr(B,T)			'''
 			(topk_ids, topk_log_probs, new_states, attn_dists, p_gens, new_coverage) = self.model_decode_onestep(
 						sess=sess,  ## fixed 
 						batch=batch,   ### fixed
@@ -814,7 +686,7 @@ class SummarizeModel(object):
 					#print('result')
 					#show_hypothesis(results)
 					break
-			print('{} {}'.format(step, self.max_dec_steps2))
+			#print('{} {}'.format(step, self.max_dec_steps2))
 			step += 1
 
 		### post-processing after while-loop 
@@ -834,28 +706,23 @@ def sort_hyps(hyps):
 	"""Return a list of Hypothesis objects, sorted by descending average log probability"""
 	return sorted(hyps, key=lambda h: h.avg_log_prob, reverse=True)
 
-
 def show_hypothesis(results):
 	for i in results:
 		print(i.tokens)
 	return 
 
 if __name__ == '__main__':
-	
+	#### 1. test summarizemodel	
 	from config import get_config, valid_config, decode_config
 	#config = get_config()
 	#config = valid_config()
 	config = decode_config()
 	model = SummarizeModel(**config)
 	
-
+	#### 2. test mask_normalize_attention
 	#test_mask_normalize_attention()
 
 	pass
-
-
-
-
 
 
 
